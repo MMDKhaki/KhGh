@@ -1,37 +1,34 @@
 #!/usr/bin/env python3
 """
-G2Ray Reality Panel – Ultimate Robust Version (v2.2 – URL Builder Fixed)
-VLESS + XTLS + Reality  |  شبیه‌ساز آپارات  |  مخصوص GitHub Actions
+G2Ray Reality Panel – v2.4 (Tunnel Parser Corrected)
+VLESS + XTLS + Reality  |  مخصوص GitHub Actions
 """
 
 import subprocess, json, sys, os, time, argparse, random, re, shutil, signal, socket, urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
 
-# ════════════════ CONFIGURATION ════════════════
-LOCAL_PORT          = 10000
-XRAY_DIR            = Path("./xray")
-XRAY_BIN            = XRAY_DIR / "xray"
-CONFIG_PATH         = Path("/tmp/g2ray_config.json")
-BORE_BIN            = Path("/usr/local/bin/bore")
-BORE_DOWNLOAD_URL   = "https://github.com/ekzhang/bore/releases/download/v0.5.2/bore-v0.5.2-x86_64-unknown-linux-musl.tar.gz"
-TUNNEL_TIMEOUT      = 20
-MONITOR_INTERVAL    = 300
+LOCAL_PORT = 10000
+XRAY_DIR = Path("./xray")
+XRAY_BIN = XRAY_DIR / "xray"
+CONFIG_PATH = Path("/tmp/g2ray_config.json")
+BORE_BIN = Path("/usr/local/bin/bore")
+BORE_DOWNLOAD_URL = "https://github.com/ekzhang/bore/releases/download/v0.5.2/bore-v0.5.2-x86_64-unknown-linux-musl.tar.gz"
+TUNNEL_TIMEOUT = 20
+MONITOR_INTERVAL = 300
 
-# سایت‌های ایرانی دارای HTTP/2
 IRANIAN_SITES = [
-    {"dest": "www.aparat.com:443",     "sni": ["www.aparat.com", "aparat.com"]},
-    {"dest": "www.digikala.com:443",   "sni": ["www.digikala.com", "digikala.com"]},
-    {"dest": "www.varzesh3.com:443",   "sni": ["www.varzesh3.com", "varzesh3.com"]},
-    {"dest": "www.ninisite.com:443",   "sni": ["www.ninisite.com", "ninisite.com"]},
-    {"dest": "www.namnak.com:443",     "sni": ["www.namnak.com", "namnak.com"]},
-    {"dest": "www.beytoote.com:443",   "sni": ["www.beytoote.com", "beytoote.com"]},
-    {"dest": "www.torob.com:443",      "sni": ["www.torob.com", "torob.com"]},
-    {"dest": "www.filimo.com:443",     "sni": ["www.filimo.com", "filimo.com"]},
-    {"dest": "yooz.ir:443",            "sni": ["yooz.ir"]},
+    {"dest": "www.aparat.com:443", "sni": ["www.aparat.com", "aparat.com"]},
+    {"dest": "www.digikala.com:443", "sni": ["www.digikala.com", "digikala.com"]},
+    {"dest": "www.varzesh3.com:443", "sni": ["www.varzesh3.com", "varzesh3.com"]},
+    {"dest": "www.ninisite.com:443", "sni": ["www.ninisite.com", "ninisite.com"]},
+    {"dest": "www.namnak.com:443", "sni": ["www.namnak.com", "namnak.com"]},
+    {"dest": "www.beytoote.com:443", "sni": ["www.beytoote.com", "beytoote.com"]},
+    {"dest": "www.torob.com:443", "sni": ["www.torob.com", "torob.com"]},
+    {"dest": "www.filimo.com:443", "sni": ["www.filimo.com", "filimo.com"]},
+    {"dest": "yooz.ir:443", "sni": ["yooz.ir"]},
 ]
 
-# ════════════════ COLORS & LOGGING ════════════════
 class C:
     HEADER = '\033[95m'
     BLUE = '\033[94m'
@@ -63,7 +60,6 @@ def banner():
 {C.END}
 """, flush=True)
 
-# ════════════════ SYSTEM UTILS ════════════════
 def run_cmd(cmd, shell=True, timeout=30):
     try:
         proc = subprocess.run(cmd, shell=shell, capture_output=True, text=True, timeout=timeout)
@@ -77,7 +73,6 @@ def is_port_open(port):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         return s.connect_ex(('127.0.0.1', port)) != 0
 
-# ════════════════ FILE DOWNLOAD ════════════════
 def download_file(url, dest_path, desc="file"):
     log(f"دانلود {desc} ...", "progress")
     try:
@@ -94,7 +89,6 @@ def download_file(url, dest_path, desc="file"):
         log(f"دانلود ناموفق ({desc}): {e}", "error")
         return False
 
-# ════════════════ XRAY INSTALLATION ════════════════
 def install_xray():
     log("دریافت لینک آخرین نسخه Xray...", "progress")
     try:
@@ -106,8 +100,7 @@ def install_xray():
             data = json.loads(resp.read().decode())
         download_url = None
         for asset in data['assets']:
-            name = asset['name']
-            if 'linux-64.zip' in name and 'dgst' not in name:
+            if 'linux-64.zip' in asset['name'] and 'dgst' not in asset['name']:
                 download_url = asset['browser_download_url']
                 break
         if not download_url:
@@ -136,7 +129,6 @@ def install_xray():
     log("Xray-core نصب شد", "success")
     return True
 
-# ════════════════ REALITY IDENTITY ════════════════
 def generate_identity():
     code, uuid_out, err = run_cmd(f"{XRAY_BIN} uuid")
     if code != 0:
@@ -152,7 +144,6 @@ def generate_identity():
         return None, None, None
     return uuid_out.strip(), pub[0].strip(), priv[0].strip()
 
-# ════════════════ CONFIG BUILDER ════════════════
 def build_config(uuid, priv, port, dest, sni):
     return {
         "log": {"loglevel": "warning"},
@@ -185,7 +176,6 @@ def build_config(uuid, priv, port, dest, sni):
         ]
     }
 
-# ════════════════ TUNNEL MANAGEMENT ════════════════
 def install_bore():
     if BORE_BIN.exists():
         return True
@@ -254,24 +244,29 @@ def start_ssh_tunnel(port):
     proc = subprocess.Popen(cmd, shell=True, preexec_fn=os.setsid, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     deadline = time.time() + TUNNEL_TIMEOUT
     tunnel_host = None
+    tunnel_port = None
     while time.time() < deadline:
         if log_file.exists():
             content = log_file.read_text(errors='ignore')
-            # به دنبال الگوی آدرس کامل بگرد
-            match = re.search(r'https?://([^\s\]]+)', content)
-            if match:
-                raw_url = match.group(0)  # http://... یا https://...
-                try:
-                    parsed = urlparse(raw_url)
-                    tunnel_host = parsed.hostname
-                except Exception:
-                    tunnel_host = match.group(1).split('/')[0]
+            # فقط دامنه‌های معتبر localhost.run یا lhr.life
+            for match in re.finditer(r'(https?://[^\s\]]+)', content):
+                url = match.group(0)
+                parsed = urlparse(url)
+                hostname = parsed.hostname
+                if hostname and (hostname.endswith('localhost.run') or hostname.endswith('lhr.life')):
+                    tunnel_host = hostname
+                    # پورت را از URL بگیریم، اگر نبود پیش‌فرض: http -> 80, https -> 443
+                    if parsed.port:
+                        tunnel_port = parsed.port
+                    else:
+                        tunnel_port = 443 if parsed.scheme == 'https' else 80
+                    break
+            if tunnel_host:
                 break
         time.sleep(1)
     if tunnel_host:
-        port_to_use = 443  # پورت پیش‌فرض برای localhost.run
-        log(f"SSH تونل فعال: {tunnel_host}:{port_to_use}", "success")
-        return tunnel_host, port_to_use
+        log(f"SSH تونل فعال: {tunnel_host}:{tunnel_port}", "success")
+        return tunnel_host, tunnel_port
     else:
         log("SSH تونل پاسخی نداد", "warn")
         os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
@@ -284,17 +279,11 @@ def obtain_tunnel(port):
             return host, port_num
     return None, None
 
-# ════════════════ VLESS LINK BUILDER (اصلاح‌شده) ════════════════
 def make_vless_link(uuid, pub_key, host, port, sni):
-    """ساخت لینک VLESS با فرمت صحیح"""
-    # اطمینان از اینکه host یک رشته ساده است
-    host = host.strip()
-    # حذف هرگونه کاراکتر اضافی احتمالی
-    host = re.sub(r'[\[\]\s]', '', host)
+    host = re.sub(r'[\[\]\s]', '', host.strip())
     return (f"vless://{uuid}@{host}:{port}?encryption=none&security=reality"
             f"&flow=xtls-rprx-vision&type=tcp&sni={sni}&fp=chrome&pbk={pub_key}#G2Ray-Iran")
 
-# ════════════════ MAIN ════════════════
 def main():
     banner()
     parser = argparse.ArgumentParser(description="G2Ray Ultimate Panel")
@@ -314,15 +303,11 @@ def main():
         sys.exit(1)
 
     if not install_xray():
-        log("نصب Xray شکست خورد", "error")
         sys.exit(1)
 
     uid, pub, priv = generate_identity()
     if not all([uid, pub, priv]):
-        log("تولید هویت شکست خورد", "error")
         sys.exit(1)
-    # لاگ کلید عمومی برای اشکال‌زدایی
-    log(f"UUID: {uid[:8]}... | PublicKey: {pub[:12]}...", "success")
 
     config = build_config(uid, priv, LOCAL_PORT, dest, sni)
     CONFIG_PATH.write_text(json.dumps(config, indent=2, ensure_ascii=False))
