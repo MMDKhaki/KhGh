@@ -41,7 +41,7 @@ jobs:
           if [ "$MODE" = "github" ]; then
             python3 g2ray_panel.py --github
           elif [ "$MODE" = "backup" ]; then
-            python3 g2ray_panel.py --backup
+            python3 g2ray_panel.py 
           else
             python3 g2ray_panel.py
           fi
