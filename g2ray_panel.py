@@ -268,7 +268,8 @@ def start_bore(port):
         while time.time() < deadline:
             if log_file.exists():
                 content = log_file.read_text(errors='ignore')
-                match = re.search(r'listening on\s+(\S+):(\d+)', content)
+                # اصلاح: گرفتن هر دو کلمه‌ی "on" و "at"
+                match = re.search(r'listening (?:on|at)\s+(\S+):(\d+)', content)
                 if match:
                     host = match.group(1)
                     port_num = int(match.group(2))
