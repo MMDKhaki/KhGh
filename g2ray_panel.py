@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-G2Ray Reality Panel – v2.4 (Tunnel Parser Corrected)
+G2Ray Reality Panel – v2.5 (Self-Healing + Connectivity Checks)
 VLESS + XTLS + Reality  |  مخصوص GitHub Actions
 """
 
-import subprocess, json, sys, os, time, argparse, random, re, shutil, signal, socket, urllib.request
+import subprocess, json, sys, os, time, argparse, random, re, shutil, signal, socket, urllib.request, threading
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -171,10 +171,47 @@ def build_config(uuid, priv, port, dest, sni):
             }
         }],
         "outbounds": [
-            {"protocol": "freedom", "tag": "direct"},
+            {
+                "protocol": "freedom",
+                "tag": "direct",
+                "settings": {
+                    "domainStrategy": "UseIP",   # حل DNS از خود سرور
+                    "timeout": 10
+                }
+            },
             {"protocol": "blackhole", "tag": "block"}
         ]
     }
+
+def test_dest_reachable(dest):
+    """بررسی دسترسی TCP به مقصد (دایمنشن:‌ پورت)"""
+    host, port_str = dest.split(":")
+    port = int(port_str)
+    try:
+        with socket.create_connection((host, port), timeout=5):
+            return True
+    except Exception:
+        return False
+
+def find_working_dest(backup=False):
+    """پیدا کردن یک مقصد قابل دسترس از لیست. اگر backup فعال باشد تصادفی انتخاب می‌کند وگرنه پیش‌فرض آپارات."""
+    if backup:
+        random.shuffle(IRANIAN_SITES)
+        for site in IRANIAN_SITES:
+            if test_dest_reachable(site["dest"]):
+                log(f"مقصد سالم: {site['dest']}", "success")
+                return site["dest"], site["sni"]
+    else:
+        # بررسی آپارات به عنوان پیش‌فرض
+        default = "www.aparat.com:443"
+        if test_dest_reachable(default):
+            return default, ["www.aparat.com", "aparat.com"]
+        # fallback to first reachable from list
+        for site in IRANIAN_SITES:
+            if test_dest_reachable(site["dest"]):
+                log(f"مقصد پیش‌فرض آپارات در دسترس نبود. استفاده از {site['dest']}", "warn")
+                return site["dest"], site["sni"]
+    return None, None
 
 def install_bore():
     if BORE_BIN.exists():
@@ -248,14 +285,12 @@ def start_ssh_tunnel(port):
     while time.time() < deadline:
         if log_file.exists():
             content = log_file.read_text(errors='ignore')
-            # فقط دامنه‌های معتبر localhost.run یا lhr.life
             for match in re.finditer(r'(https?://[^\s\]]+)', content):
                 url = match.group(0)
                 parsed = urlparse(url)
                 hostname = parsed.hostname
                 if hostname and (hostname.endswith('localhost.run') or hostname.endswith('lhr.life')):
                     tunnel_host = hostname
-                    # پورت را از URL بگیریم، اگر نبود پیش‌فرض: http -> 80, https -> 443
                     if parsed.port:
                         tunnel_port = parsed.port
                     else:
@@ -279,6 +314,50 @@ def obtain_tunnel(port):
             return host, port_num
     return None, None
 
+def test_tunnel_echo(tunnel_host, tunnel_port):
+    """تست دوطرفه بودن تونل با استفاده از سرور echo موقت"""
+    log("تست دوطرفه بودن تونل...", "progress")
+    # یک سرور echo ساده که هرچی دریافت می‌کنه برمی‌گردونه
+    def echo_server():
+        server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server_sock.bind(('', LOCAL_PORT))
+        server_sock.listen(1)
+        server_sock.settimeout(5)
+        try:
+            conn, addr = server_sock.accept()
+            data = conn.recv(1024)
+            if data == b'ping':
+                conn.sendall(b'pong')
+            conn.close()
+        except socket.timeout:
+            pass
+        finally:
+            server_sock.close()
+
+    # راه‌اندازی سرور در یک نخ جدا
+    t = threading.Thread(target=echo_server, daemon=True)
+    t.start()
+    time.sleep(0.5)
+
+    try:
+        # اتصال به تونل و ارسال ping
+        sock = socket.create_connection((tunnel_host, tunnel_port), timeout=5)
+        sock.sendall(b'ping')
+        reply = sock.recv(1024)
+        sock.close()
+        if reply == b'pong':
+            log("تونل دوطرفه سالم است", "success")
+            return True
+        else:
+            log(f"پاسخ غیرمنتظره: {reply}", "warn")
+            return False
+    except Exception as e:
+        log(f"تست echo ناموفق: {e}", "error")
+        return False
+    finally:
+        t.join(timeout=1)
+
 def make_vless_link(uuid, pub_key, host, port, sni):
     host = re.sub(r'[\[\]\s]', '', host.strip())
     return (f"vless://{uuid}@{host}:{port}?encryption=none&security=reality"
@@ -291,12 +370,21 @@ def main():
     parser.add_argument("--sni")
     args = parser.parse_args()
 
+    # انتخاب مقصد با بررسی سلامت
     if args.backup:
-        site = random.choice(IRANIAN_SITES)
-        dest, sni = site["dest"], site["sni"]
+        dest, sni = find_working_dest(backup=True)
     else:
-        dest = "www.aparat.com:443"
-        sni = args.sni.split(",") if args.sni else ["www.aparat.com", "aparat.com"]
+        if args.sni:
+            sni = args.sni.split(",")
+            dest = f"{sni[0]}:443" if ":" not in sni[0] else sni[0]
+            if not test_dest_reachable(dest):
+                log(f"مقصد {dest} در دسترس نیست", "error")
+                sys.exit(1)
+        else:
+            dest, sni = find_working_dest(backup=False)
+            if not dest:
+                log("هیچ مقصد سالمی پیدا نشد", "error")
+                sys.exit(1)
 
     if not is_port_open(LOCAL_PORT):
         log(f"پورت {LOCAL_PORT} اشغال است", "error")
@@ -328,6 +416,12 @@ def main():
     tunnel_host, tunnel_port = obtain_tunnel(LOCAL_PORT)
     if not tunnel_host:
         log("هیچ تونلی برقرار نشد", "error")
+        os.killpg(os.getpgid(xray_proc.pid), signal.SIGTERM)
+        sys.exit(1)
+
+    # تست سلامت تونل
+    if not test_tunnel_echo(tunnel_host, tunnel_port):
+        log("تست تونل شکست خورد – احتمالاً یک‌طرفه است", "error")
         os.killpg(os.getpgid(xray_proc.pid), signal.SIGTERM)
         sys.exit(1)
 
