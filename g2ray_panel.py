@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-G2Ray Reality Panel – v2.5 (Self-Healing + Connectivity Checks)
+G2Ray Reality Panel – v2.6 (Stable, No Port Conflict)
 VLESS + XTLS + Reality  |  مخصوص GitHub Actions
 """
 
-import subprocess, json, sys, os, time, argparse, random, re, shutil, signal, socket, urllib.request, threading
+import subprocess, json, sys, os, time, argparse, random, re, shutil, signal, socket, urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -175,7 +175,7 @@ def build_config(uuid, priv, port, dest, sni):
                 "protocol": "freedom",
                 "tag": "direct",
                 "settings": {
-                    "domainStrategy": "UseIP",   # حل DNS از خود سرور
+                    "domainStrategy": "UseIP",
                     "timeout": 10
                 }
             },
@@ -184,7 +184,7 @@ def build_config(uuid, priv, port, dest, sni):
     }
 
 def test_dest_reachable(dest):
-    """بررسی دسترسی TCP به مقصد (دایمنشن:‌ پورت)"""
+    """بررسی دسترسی TCP به مقصد"""
     host, port_str = dest.split(":")
     port = int(port_str)
     try:
@@ -194,7 +194,6 @@ def test_dest_reachable(dest):
         return False
 
 def find_working_dest(backup=False):
-    """پیدا کردن یک مقصد قابل دسترس از لیست. اگر backup فعال باشد تصادفی انتخاب می‌کند وگرنه پیش‌فرض آپارات."""
     if backup:
         random.shuffle(IRANIAN_SITES)
         for site in IRANIAN_SITES:
@@ -202,14 +201,12 @@ def find_working_dest(backup=False):
                 log(f"مقصد سالم: {site['dest']}", "success")
                 return site["dest"], site["sni"]
     else:
-        # بررسی آپارات به عنوان پیش‌فرض
         default = "www.aparat.com:443"
         if test_dest_reachable(default):
             return default, ["www.aparat.com", "aparat.com"]
-        # fallback to first reachable from list
         for site in IRANIAN_SITES:
             if test_dest_reachable(site["dest"]):
-                log(f"مقصد پیش‌فرض آپارات در دسترس نبود. استفاده از {site['dest']}", "warn")
+                log(f"آپارات در دسترس نبود. استفاده از {site['dest']}", "warn")
                 return site["dest"], site["sni"]
     return None, None
 
@@ -291,10 +288,7 @@ def start_ssh_tunnel(port):
                 hostname = parsed.hostname
                 if hostname and (hostname.endswith('localhost.run') or hostname.endswith('lhr.life')):
                     tunnel_host = hostname
-                    if parsed.port:
-                        tunnel_port = parsed.port
-                    else:
-                        tunnel_port = 443 if parsed.scheme == 'https' else 80
+                    tunnel_port = parsed.port if parsed.port else (443 if parsed.scheme == 'https' else 80)
                     break
             if tunnel_host:
                 break
@@ -313,50 +307,6 @@ def obtain_tunnel(port):
         if host:
             return host, port_num
     return None, None
-
-def test_tunnel_echo(tunnel_host, tunnel_port):
-    """تست دوطرفه بودن تونل با استفاده از سرور echo موقت"""
-    log("تست دوطرفه بودن تونل...", "progress")
-    # یک سرور echo ساده که هرچی دریافت می‌کنه برمی‌گردونه
-    def echo_server():
-        server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server_sock.bind(('', LOCAL_PORT))
-        server_sock.listen(1)
-        server_sock.settimeout(5)
-        try:
-            conn, addr = server_sock.accept()
-            data = conn.recv(1024)
-            if data == b'ping':
-                conn.sendall(b'pong')
-            conn.close()
-        except socket.timeout:
-            pass
-        finally:
-            server_sock.close()
-
-    # راه‌اندازی سرور در یک نخ جدا
-    t = threading.Thread(target=echo_server, daemon=True)
-    t.start()
-    time.sleep(0.5)
-
-    try:
-        # اتصال به تونل و ارسال ping
-        sock = socket.create_connection((tunnel_host, tunnel_port), timeout=5)
-        sock.sendall(b'ping')
-        reply = sock.recv(1024)
-        sock.close()
-        if reply == b'pong':
-            log("تونل دوطرفه سالم است", "success")
-            return True
-        else:
-            log(f"پاسخ غیرمنتظره: {reply}", "warn")
-            return False
-    except Exception as e:
-        log(f"تست echo ناموفق: {e}", "error")
-        return False
-    finally:
-        t.join(timeout=1)
 
 def make_vless_link(uuid, pub_key, host, port, sni):
     host = re.sub(r'[\[\]\s]', '', host.strip())
@@ -419,9 +369,13 @@ def main():
         os.killpg(os.getpgid(xray_proc.pid), signal.SIGTERM)
         sys.exit(1)
 
-    # تست سلامت تونل
-    if not test_tunnel_echo(tunnel_host, tunnel_port):
-        log("تست تونل شکست خورد – احتمالاً یک‌طرفه است", "error")
+    # تست ساده‌ی TCP (بدون اشغال پورت)
+    log("تست اتصال به تونل...", "progress")
+    try:
+        with socket.create_connection((tunnel_host, tunnel_port), timeout=5) as s:
+            log("تونل قابل دسترسی است", "success")
+    except Exception as e:
+        log(f"اتصال به تونل ناموفق: {e}", "error")
         os.killpg(os.getpgid(xray_proc.pid), signal.SIGTERM)
         sys.exit(1)
 
