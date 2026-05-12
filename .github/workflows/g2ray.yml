@@ -1,23 +1,56 @@
-name: G2Ray Reality Panel (Iran)
+name: G2Ray Reality Config Generator
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '0 */4 * * *'
+    inputs:
+      sni_mode:
+        description: 'Select target SNI'
+        required: true
+        type: choice
+        default: 'auto'
+        options:
+          - auto
+          - backup
+          - github
+  push:
+    branches: [main]
 
 jobs:
-  server:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 350
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  generate:
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - name: نصب پیش‌نیازها
+      - name: Install system dependencies
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq curl unzip tar openssh-client
+          sudo apt-get update
+          sudo apt-get install -y unzip openssh-client tar curl
 
-      - name: اجرای پنل G2Ray
-        run: python3 -u g2ray_panel.py --backup
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Python dependencies
+        run: pip install qrcode[pil]
+
+      - name: Run G2Ray Panel
+        run: |
+          MODE="${{ github.event.inputs.sni_mode }}"
+          if [ "$MODE" = "github" ]; then
+            python3 g2ray_panel.py --github
+          elif [ "$MODE" = "backup" ]; then
+            python3 g2ray_panel.py --backup
+          else
+            python3 g2ray_panel.py
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: g2ray-config
+          path: |
+            vless_link.txt
+            qr.png
+            config_summary.json
