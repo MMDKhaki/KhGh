@@ -9,6 +9,8 @@ jobs:
   server:
     runs-on: ubuntu-22.04
     timeout-minutes: 350
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true   # ← رفع هشدار Node.js 20
     steps:
       - uses: actions/checkout@v4
 
