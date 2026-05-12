@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-G2Ray Reality Panel – v2.6 (Stable, No Port Conflict)
+G2Ray Reality Panel – v2.7 (Bore Diagnostic + Retries)
 VLESS + XTLS + Reality  |  مخصوص GitHub Actions
 """
 
@@ -14,7 +14,6 @@ XRAY_BIN = XRAY_DIR / "xray"
 CONFIG_PATH = Path("/tmp/g2ray_config.json")
 BORE_BIN = Path("/usr/local/bin/bore")
 BORE_DOWNLOAD_URL = "https://github.com/ekzhang/bore/releases/download/v0.5.2/bore-v0.5.2-x86_64-unknown-linux-musl.tar.gz"
-TUNNEL_TIMEOUT = 20
 MONITOR_INTERVAL = 300
 
 IRANIAN_SITES = [
@@ -184,7 +183,6 @@ def build_config(uuid, priv, port, dest, sni):
     }
 
 def test_dest_reachable(dest):
-    """بررسی دسترسی TCP به مقصد"""
     host, port_str = dest.split(":")
     port = int(port_str)
     try:
@@ -244,29 +242,51 @@ def install_bore():
 def start_bore(port):
     if not install_bore():
         return None, None
-    log("اجرای تونل Bore...", "progress")
-    log_file = Path("/tmp/bore_output.txt")
-    cmd = f"{BORE_BIN} local {port} --to bore.pub > {log_file} 2>&1"
-    proc = subprocess.Popen(cmd, shell=True, preexec_fn=os.setsid, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    deadline = time.time() + TUNNEL_TIMEOUT
-    tunnel_addr = None
-    while time.time() < deadline:
-        if log_file.exists():
-            content = log_file.read_text(errors='ignore')
-            match = re.search(r'listening on\s+(\S+):(\d+)', content)
-            if match:
-                host = match.group(1)
-                port_num = int(match.group(2))
-                tunnel_addr = (host, port_num)
-                break
-        time.sleep(1)
-    if tunnel_addr:
-        log(f"Bore فعال: {tunnel_addr[0]}:{tunnel_addr[1]}", "success")
-        return tunnel_addr
-    else:
-        log("Bore پاسخی نداد", "warn")
-        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+
+    # تست دسترسی به bore.pub
+    log("بررسی دسترسی به bore.pub...", "progress")
+    try:
+        with socket.create_connection(("bore.pub", 7835), timeout=5):
+            log("bore.pub در دسترس است", "success")
+    except Exception:
+        log("bore.pub در حال حاضر از این رانر مسدود یا قطع است", "warn")
         return None, None
+
+    for attempt in range(1, 3):
+        if attempt > 1:
+            log(f"تلاش مجدد Bore (بار {attempt})...", "warn")
+            time.sleep(5)
+        else:
+            log(f"اجرای تونل Bore (تلاش {attempt})...", "progress")
+
+        log_file = Path("/tmp/bore_output.txt")
+        cmd = f"{BORE_BIN} local {port} --to bore.pub > {log_file} 2>&1"
+        proc = subprocess.Popen(cmd, shell=True, preexec_fn=os.setsid,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        deadline = time.time() + 35
+        tunnel_addr = None
+        while time.time() < deadline:
+            if log_file.exists():
+                content = log_file.read_text(errors='ignore')
+                match = re.search(r'listening on\s+(\S+):(\d+)', content)
+                if match:
+                    host = match.group(1)
+                    port_num = int(match.group(2))
+                    tunnel_addr = (host, port_num)
+                    break
+            time.sleep(1)
+        if tunnel_addr:
+            log(f"Bore فعال: {tunnel_addr[0]}:{tunnel_addr[1]}", "success")
+            return tunnel_addr
+        else:
+            if log_file.exists():
+                stderr_content = log_file.read_text(errors='ignore')
+                if stderr_content.strip():
+                    log(f"خروجی Bore:\n{stderr_content.strip()}", "error")
+            log("Bore در این تلاش پاسخی نداد", "warn")
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+
+    return None, None
 
 def start_ssh_tunnel(port):
     if not shutil.which("ssh"):
@@ -276,7 +296,7 @@ def start_ssh_tunnel(port):
     log_file = Path("/tmp/ssh_output.txt")
     cmd = f"ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=60 -R 80:localhost:{port} nokey@localhost.run > {log_file} 2>&1"
     proc = subprocess.Popen(cmd, shell=True, preexec_fn=os.setsid, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    deadline = time.time() + TUNNEL_TIMEOUT
+    deadline = time.time() + 20
     tunnel_host = None
     tunnel_port = None
     while time.time() < deadline:
@@ -302,11 +322,12 @@ def start_ssh_tunnel(port):
         return None, None
 
 def obtain_tunnel(port):
-    for method in (start_bore, start_ssh_tunnel):
-        host, port_num = method(port)
-        if host:
-            return host, port_num
-    return None, None
+    # اولویت با Bore (2 تلاش داخلی)
+    host, port_num = start_bore(port)
+    if host:
+        return host, port_num
+    # در غیر اینصورت SSH
+    return start_ssh_tunnel(port)
 
 def make_vless_link(uuid, pub_key, host, port, sni):
     host = re.sub(r'[\[\]\s]', '', host.strip())
@@ -320,7 +341,6 @@ def main():
     parser.add_argument("--sni")
     args = parser.parse_args()
 
-    # انتخاب مقصد با بررسی سلامت
     if args.backup:
         dest, sni = find_working_dest(backup=True)
     else:
@@ -369,7 +389,7 @@ def main():
         os.killpg(os.getpgid(xray_proc.pid), signal.SIGTERM)
         sys.exit(1)
 
-    # تست ساده‌ی TCP (بدون اشغال پورت)
+    # تست ساده‌ی TCP
     log("تست اتصال به تونل...", "progress")
     try:
         with socket.create_connection((tunnel_host, tunnel_port), timeout=5) as s:
