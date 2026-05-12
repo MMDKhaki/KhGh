@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 350
     env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true   # ← رفع هشدار Node.js 20
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
       - uses: actions/checkout@v4
 
@@ -20,4 +20,4 @@ jobs:
           sudo apt-get install -y -qq curl unzip tar openssh-client
 
       - name: اجرای پنل G2Ray
-        run: python3 g2ray_panel.py --backup
+        run: python3 -u g2ray_panel.py --backup
