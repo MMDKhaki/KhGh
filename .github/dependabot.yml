@@ -1,17 +1,17 @@
 version: 2
 updates:
-  # ۱. به‌روزرسانی خودکار اکشن‌های GitHub (workflowها)
+  # 1. Daily security updates for GitHub Actions
   - package-ecosystem: "github-actions"
-    directory: "/"                 # دایرکتوری‌ای که workflows/ داخلشه
+    directory: "/"
     schedule:
-      interval: "weekly"
-      day: "sunday"                # اختیاری؛ هر هفته یکشنبه
+      interval: "daily"              # Check every day
+      time: "00:00"                  # Midnight check (optional)
     labels:
       - "dependencies"
       - "github-actions"
-      
-  # ۲. اگه بعداً requirements.txt یا Pipfile اضافه کردی این بخش رو فعال کن
-  # - package-ecosystem: "pip"
-  #   directory: "/"
-  #   schedule:
-  #     interval: "weekly"
+      - "high-security"              # Label for security PRs
+    commit-message:
+      prefix: "🔒 SECURITY"
+      include: "scope"
+    # Only create PRs for security updates
+    open-pull-requests-limit: 10
