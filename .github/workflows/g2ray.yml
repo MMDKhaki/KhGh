@@ -1,17 +1,21 @@
-name: G2Ray Reality Panel
+name: G2Ray Reality Panel (Iran)
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 */4 * * *'
+    - cron: '0 */4 * * *'   # هر ۴ ساعت یکبار
 
 jobs:
-  run:
+  server:
     runs-on: ubuntu-22.04
     timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
-      - name: نصب پیش‌نیازها
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq openssh-client unzip
-      - name: اجرای G2Ray
+
+      - name: آماده‌سازی پیش‌نیازها
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq curl unzip openssh-client
+
+      - name: اجرای پنل G2Ray
         run: python3 g2ray_panel.py --backup
