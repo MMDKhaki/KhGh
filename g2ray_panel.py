@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-G2Ray Reality Panel – Ultimate Robust Version (v2.1 – Debuggable)
+G2Ray Reality Panel – Ultimate Robust Version (v2.2 – URL Builder Fixed)
 VLESS + XTLS + Reality  |  شبیه‌ساز آپارات  |  مخصوص GitHub Actions
 """
 
-import subprocess, json, sys, os, time, argparse, random, re, shutil, signal, socket, urllib.request, traceback
+import subprocess, json, sys, os, time, argparse, random, re, shutil, signal, socket, urllib.request
 from pathlib import Path
+from urllib.parse import urlparse
 
 # ════════════════ CONFIGURATION ════════════════
 LOCAL_PORT          = 10000
@@ -17,6 +18,7 @@ BORE_DOWNLOAD_URL   = "https://github.com/ekzhang/bore/releases/download/v0.5.2/
 TUNNEL_TIMEOUT      = 20
 MONITOR_INTERVAL    = 300
 
+# سایت‌های ایرانی دارای HTTP/2
 IRANIAN_SITES = [
     {"dest": "www.aparat.com:443",     "sni": ["www.aparat.com", "aparat.com"]},
     {"dest": "www.digikala.com:443",   "sni": ["www.digikala.com", "digikala.com"]},
@@ -75,9 +77,9 @@ def is_port_open(port):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         return s.connect_ex(('127.0.0.1', port)) != 0
 
-# ════════════════ FILE DOWNLOAD (urllib with redirect handling) ════════════════
+# ════════════════ FILE DOWNLOAD ════════════════
 def download_file(url, dest_path, desc="file"):
-    log(f"دانلود {desc} از {url[:60]}...", "progress")
+    log(f"دانلود {desc} ...", "progress")
     try:
         req = urllib.request.Request(url, headers={'User-Agent': 'curl/7.81.0'})
         with urllib.request.urlopen(req, timeout=60) as response:
@@ -94,7 +96,7 @@ def download_file(url, dest_path, desc="file"):
 
 # ════════════════ XRAY INSTALLATION ════════════════
 def install_xray():
-    log("دریافت لینک آخرین نسخه Xray ...", "progress")
+    log("دریافت لینک آخرین نسخه Xray...", "progress")
     try:
         req = urllib.request.Request(
             "https://api.github.com/repos/XTLS/Xray-core/releases/latest",
@@ -120,7 +122,7 @@ def install_xray():
     if not download_file(download_url, zip_path, "Xray-core"):
         return False
 
-    log("استخراج Xray ...", "progress")
+    log("استخراج Xray...", "progress")
     code, _, err = run_cmd(f"unzip -o {zip_path} -d {XRAY_DIR}")
     if code != 0:
         log(f"خطای unzip: {err}", "error")
@@ -187,7 +189,7 @@ def build_config(uuid, priv, port, dest, sni):
 def install_bore():
     if BORE_BIN.exists():
         return True
-    log("نصب تونل Bore ...", "progress")
+    log("نصب تونل Bore...", "progress")
     tmp_dir = Path("/tmp/bore_install")
     tmp_dir.mkdir(exist_ok=True)
     tar_path = tmp_dir / "bore.tar.gz"
@@ -218,7 +220,7 @@ def install_bore():
 def start_bore(port):
     if not install_bore():
         return None, None
-    log("اجرای تونل Bore ...", "progress")
+    log("اجرای تونل Bore...", "progress")
     log_file = Path("/tmp/bore_output.txt")
     cmd = f"{BORE_BIN} local {port} --to bore.pub > {log_file} 2>&1"
     proc = subprocess.Popen(cmd, shell=True, preexec_fn=os.setsid, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -243,7 +245,10 @@ def start_bore(port):
         return None, None
 
 def start_ssh_tunnel(port):
-    log("اجرای تونل SSH ...", "progress")
+    if not shutil.which("ssh"):
+        log("ssh یافت نشد", "error")
+        return None, None
+    log("اجرای تونل SSH (localhost.run)...", "progress")
     log_file = Path("/tmp/ssh_output.txt")
     cmd = f"ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=60 -R 80:localhost:{port} nokey@localhost.run > {log_file} 2>&1"
     proc = subprocess.Popen(cmd, shell=True, preexec_fn=os.setsid, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -252,15 +257,21 @@ def start_ssh_tunnel(port):
     while time.time() < deadline:
         if log_file.exists():
             content = log_file.read_text(errors='ignore')
-            match = re.search(r'https?://(\S+)', content)
+            # به دنبال الگوی آدرس کامل بگرد
+            match = re.search(r'https?://([^\s\]]+)', content)
             if match:
-                raw = match.group(1).rstrip('/')
-                tunnel_host = raw
+                raw_url = match.group(0)  # http://... یا https://...
+                try:
+                    parsed = urlparse(raw_url)
+                    tunnel_host = parsed.hostname
+                except Exception:
+                    tunnel_host = match.group(1).split('/')[0]
                 break
         time.sleep(1)
     if tunnel_host:
-        log(f"SSH تونل فعال: {tunnel_host} (پورت ۴۴۳)", "success")
-        return tunnel_host, 443
+        port_to_use = 443  # پورت پیش‌فرض برای localhost.run
+        log(f"SSH تونل فعال: {tunnel_host}:{port_to_use}", "success")
+        return tunnel_host, port_to_use
     else:
         log("SSH تونل پاسخی نداد", "warn")
         os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
@@ -273,8 +284,13 @@ def obtain_tunnel(port):
             return host, port_num
     return None, None
 
-# ════════════════ VLESS LINK ════════════════
+# ════════════════ VLESS LINK BUILDER (اصلاح‌شده) ════════════════
 def make_vless_link(uuid, pub_key, host, port, sni):
+    """ساخت لینک VLESS با فرمت صحیح"""
+    # اطمینان از اینکه host یک رشته ساده است
+    host = host.strip()
+    # حذف هرگونه کاراکتر اضافی احتمالی
+    host = re.sub(r'[\[\]\s]', '', host)
     return (f"vless://{uuid}@{host}:{port}?encryption=none&security=reality"
             f"&flow=xtls-rprx-vision&type=tcp&sni={sni}&fp=chrome&pbk={pub_key}#G2Ray-Iran")
 
@@ -305,13 +321,14 @@ def main():
     if not all([uid, pub, priv]):
         log("تولید هویت شکست خورد", "error")
         sys.exit(1)
+    # لاگ کلید عمومی برای اشکال‌زدایی
     log(f"UUID: {uid[:8]}... | PublicKey: {pub[:12]}...", "success")
 
     config = build_config(uid, priv, LOCAL_PORT, dest, sni)
     CONFIG_PATH.write_text(json.dumps(config, indent=2, ensure_ascii=False))
     log("پیکربندی Reality ذخیره شد", "success")
 
-    log("راه‌اندازی Xray ...", "progress")
+    log("راه‌اندازی Xray...", "progress")
     xray_proc = subprocess.Popen(
         [str(XRAY_BIN), "run", "-config", str(CONFIG_PATH)],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -377,5 +394,6 @@ if __name__ == "__main__":
         main()
     except Exception as e:
         print(f"{C.RED}[✗] خطای بحرانی:{C.END} {e}", flush=True)
+        import traceback
         traceback.print_exc()
         sys.exit(1)
