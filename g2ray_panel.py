@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-G2Ray Reality Panel – v2.7 (Bore Diagnostic + Retries)
+G2Ray Reality Panel – v2.8 (QR Code + GitHub SNI + Artifacts)
 VLESS + XTLS + Reality  |  مخصوص GitHub Actions
 """
 
 import subprocess, json, sys, os, time, argparse, random, re, shutil, signal, socket, urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
+import base64, qrcode, io, textwrap
 
 LOCAL_PORT = 10000
 XRAY_DIR = Path("./xray")
@@ -191,7 +192,16 @@ def test_dest_reachable(dest):
     except Exception:
         return False
 
-def find_working_dest(backup=False):
+def find_working_dest(backup=False, github_sni=False):
+    if github_sni:
+        dest = "github.com:443"
+        sni = ["github.com"]
+        if test_dest_reachable(dest):
+            log(f"مقصد GitHub انتخاب شد: {dest}", "success")
+            return dest, sni
+        else:
+            log("github.com:443 در دسترس نیست!", "error")
+            return None, None
     if backup:
         random.shuffle(IRANIAN_SITES)
         for site in IRANIAN_SITES:
@@ -243,7 +253,6 @@ def start_bore(port):
     if not install_bore():
         return None, None
 
-    # تست دسترسی به bore.pub
     log("بررسی دسترسی به bore.pub...", "progress")
     try:
         with socket.create_connection(("bore.pub", 7835), timeout=5):
@@ -268,7 +277,6 @@ def start_bore(port):
         while time.time() < deadline:
             if log_file.exists():
                 content = log_file.read_text(errors='ignore')
-                # اصلاح: گرفتن هر دو کلمه‌ی "on" و "at"
                 match = re.search(r'listening (?:on|at)\s+(\S+):(\d+)', content)
                 if match:
                     host = match.group(1)
@@ -323,11 +331,9 @@ def start_ssh_tunnel(port):
         return None, None
 
 def obtain_tunnel(port):
-    # اولویت با Bore (2 تلاش داخلی)
     host, port_num = start_bore(port)
     if host:
         return host, port_num
-    # در غیر اینصورت SSH
     return start_ssh_tunnel(port)
 
 def make_vless_link(uuid, pub_key, host, port, sni):
@@ -335,14 +341,41 @@ def make_vless_link(uuid, pub_key, host, port, sni):
     return (f"vless://{uuid}@{host}:{port}?encryption=none&security=reality"
             f"&flow=xtls-rprx-vision&type=tcp&sni={sni}&fp=chrome&pbk={pub_key}#G2Ray-Iran")
 
+def generate_qr(data: str, output_png="qr.png", ascii_art=True):
+    """Generate QR code PNG and ASCII representation."""
+    qr = qrcode.QRCode(version=1, box_size=10, border=2)
+    qr.add_data(data)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    img.save(output_png)
+    log(f"QR code saved as {output_png}", "success")
+    if ascii_art:
+        # Print ASCII QR to terminal
+        qr_img = img.convert('L')
+        width, height = qr_img.size
+        ascii_str = ""
+        for y in range(0, height, 10):
+            row = ""
+            for x in range(0, width, 10):
+                pixel = qr_img.getpixel((x, y))
+                row += "█" if pixel < 128 else " "
+            ascii_str += row + "\n"
+        print(f"\n{C.BOLD}{C.CYAN}QR Code (ASCII):{C.END}\n{ascii_str}")
+
 def main():
     banner()
     parser = argparse.ArgumentParser(description="G2Ray Ultimate Panel")
     parser.add_argument("--backup", action="store_true")
+    parser.add_argument("--github", action="store_true", help="Use github.com as SNI/destination")
     parser.add_argument("--sni")
     args = parser.parse_args()
 
-    if args.backup:
+    if args.github:
+        dest, sni = find_working_dest(github_sni=True)
+        if not dest:
+            log("GitHub mode failed", "error")
+            sys.exit(1)
+    elif args.backup:
         dest, sni = find_working_dest(backup=True)
     else:
         if args.sni:
@@ -390,7 +423,6 @@ def main():
         os.killpg(os.getpgid(xray_proc.pid), signal.SIGTERM)
         sys.exit(1)
 
-    # تست ساده‌ی TCP
     log("تست اتصال به تونل...", "progress")
     try:
         with socket.create_connection((tunnel_host, tunnel_port), timeout=5) as s:
@@ -401,6 +433,20 @@ def main():
         sys.exit(1)
 
     vless_link = make_vless_link(uid, pub, tunnel_host, tunnel_port, sni[0])
+
+    # --- Write artifacts ---
+    Path("vless_link.txt").write_text(vless_link)
+    Path("config_summary.json").write_text(json.dumps({
+        "uuid": uid,
+        "public_key": pub,
+        "sni": sni[0],
+        "local_port": LOCAL_PORT,
+        "tunnel_host": tunnel_host,
+        "tunnel_port": tunnel_port,
+        "destination": dest,
+        "vless_link": vless_link
+    }, indent=2))
+
     print(f"""
 {C.BOLD}{C.GREEN}═══════════════════════════════════════════════════════
  ✅  کانفیگ آماده
@@ -415,33 +461,16 @@ def main():
  🔗 لینک اتصال:
  {C.GREEN}{vless_link}{C.END}
 ═══════════════════════════════════════════════════════
- ⏳ سرور فعال است (تا ۶ ساعت). پیام‌های زنده بودن
-    هر ۵ دقیقه نمایش داده می‌شود.
-{C.END}
 """, flush=True)
 
-    def cleanup(signum=None, frame=None):
-        log("پایان سرور", "warn")
-        if xray_proc.poll() is None:
-            os.killpg(os.getpgid(xray_proc.pid), signal.SIGTERM)
-        sys.exit(0)
-
-    signal.signal(signal.SIGTERM, cleanup)
-    signal.signal(signal.SIGINT, cleanup)
-
-    start_time = time.time()
-    last_heartbeat = 0
+    # Generate QR code
     try:
-        while xray_proc.poll() is None:
-            time.sleep(30)
-            elapsed = int(time.time() - start_time)
-            if elapsed - last_heartbeat >= MONITOR_INTERVAL:
-                log(f"سرور فعال – {elapsed//60} دقیقه گذشته", "heartbeat")
-                last_heartbeat = elapsed
-    except KeyboardInterrupt:
-        pass
-    finally:
-        cleanup()
+        generate_qr(vless_link, output_png="qr.png", ascii_art=True)
+    except Exception as e:
+        log(f"QR generation failed: {e}", "warn")
+
+    print(f"\n{C.BOLD}{C.YELLOW}⬇️  Download your config at workflow artifacts.{C.END}\n", flush=True)
+    sys.exit(0)   # Exit cleanly for workflow artifacts to be uploaded
 
 if __name__ == "__main__":
     try:
