@@ -1,361 +1,474 @@
 #!/usr/bin/env python3
 """
-G2Ray Reality Panel – Ultimate Stable Version
-VLESS + XTLS + Reality | عبور از فیلترینگ با شبیه‌سازی آپارات
-همهٔ توابع دارای تایم‌اوت مستقل، تلاش مجدد و fallback هستند.
+G2Ray Auto-Panel: VLESS Reality Config Generator
+نسل جدید پروژه g2ray برای عبور از فیلترینگ با شبیه‌سازی ترافیک آپارات
+
+نحوه اجرا: python3 g2ray_panel.py [--tunnel bore]
 """
 
-import subprocess, json, sys, os, time, argparse, random, re, shutil, signal
+import subprocess
+import json
+import sys
+import os
+import time
+import argparse
+import signal
+import uuid
+import hashlib
+import random
+import socket
+import platform
+import re
+import tempfile
+from typing import Tuple, Optional
 from pathlib import Path
-from typing import Optional, Tuple, Dict, List
 
-# ════════════════ CONFIGURATION ════════════════
-LOCAL_PORT          = 10000
-XRAY_DIR            = Path("./xray")
-XRAY_BIN            = XRAY_DIR / "xray"
-CONFIG_PATH         = Path("/tmp/g2ray_config.json")
-BORE_BIN            = Path("/usr/local/bin/bore")
-BORE_URL            = "https://github.com/ekzhang/bore/releases/download/v0.5.2/bore-v0.5.2-x86_64-unknown-linux-musl.tar.gz"
-DOWNLOAD_TIMEOUT    = 120           # ثانیه
-TUNNEL_TIMEOUT      = 20            # ثانیه برای هر تونل
-MONITOR_INTERVAL    = 300           # گزارش وضعیت هر ۵ دقیقه
+# ══════════════════════════════════════════════════════════════
+# 0. GLOBALS, DEFAULTS & CONSTANTS
+# ══════════════════════════════════════════════════════════════
 
-# سایت‌های ایرانی دارای HTTP/2 (ترافیک عادی)
-IRANIAN_SITES = [
-    {"dest": "www.aparat.com:443",     "sni": ["www.aparat.com", "aparat.com"]},
-    {"dest": "www.digikala.com:443",   "sni": ["www.digikala.com", "digikala.com"]},
-    {"dest": "www.varzesh3.com:443",   "sni": ["www.varzesh3.com", "varzesh3.com"]},
-    {"dest": "www.ninisite.com:443",   "sni": ["www.ninisite.com", "ninisite.com"]},
-    {"dest": "www.namnak.com:443",     "sni": ["www.namnak.com", "namnak.com"]},
-    {"dest": "www.beytoote.com:443",   "sni": ["www.beytoote.com", "beytoote.com"]},
-    {"dest": "www.torob.com:443",      "sni": ["www.torob.com", "torob.com"]},
-    {"dest": "www.filimo.com:443",     "sni": ["www.filimo.com", "filimo.com"]},
-    {"dest": "yooz.ir:443",            "sni": ["yooz.ir", "yooz.ir"]},
+# --- پیش‌فرض‌های امنیتی پیشنهادی برای ایران ---
+DEFAULT_PORT = 443
+DEFAULT_DEST = "www.aparat.com:443"           # هدف اصلی شبیه‌سازی
+DEFAULT_SERVER_NAMES = ["www.aparat.com", "aparat.com"] # SNI لیست
+
+# وب‌سایت‌های پرطرفدار ایرانی که از HTTP/2 پشتیبانی می‌کنند (بکاپ‌های هوشمند)
+backup_iranian_sites = [
+    {"dest": "www.aparat.com:443", "sni": ["www.aparat.com", "aparat.com"]},
+    {"dest": "www.digikala.com:443", "sni": ["www.digikala.com", "digikala.com"]},
+    {"dest": "www.ninisite.com:443", "sni": ["www.ninisite.com", "ninisite.com"]},
+    {"dest": "www.namnak.com:443", "sni": ["www.namnak.com", "namnak.com"]},
+    {"dest": "www.varzesh3.com:443", "sni": ["www.varzesh3.com", "varzesh3.com"]},
+    {"dest": "www.beytoote.com:443", "sni": ["www.beytoote.com", "beytoote.com"]},
+    {"dest": "www.torob.com:443", "sni": ["www.torob.com", "torob.com"]},
+    {"dest": "www.filimo.com:443", "sni": ["www.filimo.com", "filimo.com"]},
+    {"dest": "www.sheypoor.com:443", "sni": ["www.sheypoor.com", "sheypoor.com"]},
+    {"dest": "yooz.ir:443", "sni": ["yooz.ir", "yooz.ir"]},
+    {"dest": "www.isna.ir:443", "sni": ["www.isna.ir", "isna.ir"]},
+    {"dest": "www.iribnews.ir:443", "sni": ["www.iribnews.ir", "iribnews.ir"]},
 ]
 
-# ════════════════ LOGGING & COLORS ════════════════
-class C:
-    HEADER = '\033[95m'; BLUE = '\033[94m'; GREEN = '\033[92m'
-    YELLOW = '\033[93m'; RED = '\033[91m'; END = '\033[0m'; BOLD = '\033[1m'
+# --- مسیرهای پیش‌فرض در محیط گیت‌هاب ---
+XRAY_BIN = "./xray/xray"
+TEMP_DIR = "/tmp/g2ray"
 
-def log(msg: str, level: str = "info") -> None:
-    prefixes = {
-        "info": f"{C.BLUE}[>]{C.END}",
-        "success": f"{C.GREEN}[✓]{C.END}",
-        "warn": f"{C.YELLOW}[!]{C.END}",
-        "error": f"{C.RED}[✗]{C.END}",
-        "heartbeat": f"{C.HEADER}[♥]{C.END}"
-    }
-    print(f"{prefixes.get(level, '[ ]')} {msg}")
+# پارامترهای تونل
+BORE_BIN = "/usr/local/bin/bore"
+BORE_REMOTE = "bore.pub"
 
-def banner():
-    print(f"""
-{C.BOLD}{C.CYAN}
-╔══════════════════════════════════════════════════╗
-║       G2Ray Reality Panel – Ultimate Stable      ║
-║    VLESS + XTLS + Reality  |  شبیه‌ساز آپارات     ║
-╚══════════════════════════════════════════════════╝
-{C.END}
-""")
+class Colors:
+    """رنگ‌های ترمینال برای نمایش بهتر اطلاعات."""
+    HEADER = '\033[95m'
+    BLUE = '\033[94m'
+    CYAN = '\033[96m'
+    GREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    END = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
 
-# ════════════════ SYSTEM UTILS ════════════════
-def run_cmd(cmd: str, timeout: int = 30, shell: bool = True) -> Tuple[int, str, str]:
-    """اجرای یک فرمان با timeout و ثبت خروجی"""
+
+# ══════════════════════════════════════════════════════════════
+# 1. UTILITY FUNCTIONS
+# ══════════════════════════════════════════════════════════════
+
+def print_banner() -> None:
+    """نمایش بنر اصلی G2Ray."""
+    banner = f"""
+{Colors.CYAN}{Colors.BOLD}
+╔═══════════════════════════════════════════════════════════════════╗
+║                                                                   ║
+║        ██████╗ ██████╗ ██████╗  █████╗ ██╗   ██╗                 ║
+║       ██╔════╝      ██║██╔══██╗██╔══██╗╚██╗ ██╔╝                 ║
+║       ██║  ███╗ █████╔╝██████╔╝███████║ ╚████╔╝                  ║
+║       ██║   ██║██╔══██╗██╔══██╗██╔══██║  ╚██╔╝                   ║
+║       ╚██████╔╝██║  ██║██║  ██║██║  ██║   ██║                    ║
+║        ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝   ╚═╝                    ║
+║                                                                   ║
+║   VLESS + XTLS + REALITY - Anti-Censorship Panel                  ║
+║   شبیه‌سازی ترافیک آپارات برای عبور از فیلترینگ                    ║
+║   Powered by GitHub Actions - کاملاً رایگان و بدون تحریم           ║
+║                                                                   ║
+╚═══════════════════════════════════════════════════════════════════╝
+{Colors.END}"""
+    print(banner)
+
+
+def log_success(msg: str) -> None:
+    print(f"{Colors.GREEN}[✓] {msg}{Colors.END}")
+
+def log_info(msg: str) -> None:
+    print(f"{Colors.BLUE}[>] {msg}{Colors.END}")
+
+def log_warning(msg: str) -> None:
+    print(f"{Colors.WARNING}[!] هشدار: {msg}{Colors.END}")
+
+def log_error(msg: str) -> None:
+    print(f"{Colors.FAIL}[✗] خطا: {msg}{Colors.END}", file=sys.stderr)
+
+def log_critical(msg: str) -> int:
+    """نمایش خطای بحرانی و خروج با کد 1."""
+    print(f"{Colors.FAIL}[✗] بحرانی: {msg}{Colors.END}", file=sys.stderr)
+    return 1
+
+def run_command(cmd: str, shell: bool = True, timeout: int = 30) -> Tuple[int, str, str]:
+    """اجرای دستور سیستم با مدیریت خطا و Timeout."""
     try:
         proc = subprocess.run(cmd, shell=shell, capture_output=True, text=True, timeout=timeout)
-        return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+        return proc.returncode, proc.stdout, proc.stderr
     except subprocess.TimeoutExpired:
         return -1, "", "Timeout"
     except Exception as e:
         return -1, "", str(e)
 
-def download_with_curl(url: str, dest: Path, timeout: int = DOWNLOAD_TIMEOUT) -> bool:
-    """دانلود فایل با curl و تایم‌اوت مشخص (بدون hang)"""
-    log(f"دانلود {dest.name} از {url[:50]}...", "info")
-    code, _, err = run_cmd(
-        f"curl -sL --max-time {timeout} '{url}' -o {dest}",
-        timeout=timeout + 10
-    )
-    if code != 0:
-        log(f"خطای دانلود: {err}", "error")
-        return False
-    if dest.stat().st_size == 0:
-        log("فایل دانلود شده خالی است", "error")
-        return False
-    log("دانلود موفق", "success")
-    return True
 
-# ════════════════ XRAY CORE INSTALLATION ════════════════
-def install_xray() -> bool:
-    """نصب آخرین نسخه Xray-core با دانلود مطمئن"""
-    log("دریافت آخرین لینک Xray-core...", "info")
-    code, out, _ = run_cmd(
-        "curl -sL https://api.github.com/repos/XTLS/Xray-core/releases/latest | "
-        "grep 'browser_download_url.*linux-64.zip' | grep -v 'dgst' | "
-        "cut -d : -f 2,3 | tr -d '\"' | tr -d ' '"
-    )
-    if code != 0 or not out:
-        log("خطا در دریافت لینک Xray", "error")
-        return False
-    url = out.splitlines()[0].strip()
-    XRAY_DIR.mkdir(parents=True, exist_ok=True)
-    zip_path = XRAY_DIR / "xray.zip"
-    if not download_with_curl(url, zip_path):
-        return False
+# ══════════════════════════════════════════════════════════════
+# 2. CORE CONFIGURATION
+# ══════════════════════════════════════════════════════════════
 
-    log("استخراج فایل Xray...", "info")
-    code, _, err = run_cmd(f"unzip -o {zip_path} -d {XRAY_DIR}")
-    if code != 0:
-        log(f"خطای unzip: {err}", "error")
-        return False
+def download_xray_core(xray_path: str = XRAY_BIN) -> bool:
+    """دانلود و نصب آخرین نسخه Xray-Core از مخزن رسمی XTLS."""
+    log_info("در حال دانلود Xray-Core...")
+    try:
+        # دریافت لینک آخرین نسخه
+        fetch_cmd = 'curl -sL https://api.github.com/repos/XTLS/Xray-core/releases/latest | grep "browser_download_url.*linux-64.zip" | cut -d : -f 2,3 | tr -d \\"'
+        code, out, err = run_command(fetch_cmd, timeout=15)
+        if code != 0 or not out.strip():
+            return log_critical("خطا در دریافت لینک Xray-Core")
 
-    binary = XRAY_DIR / "xray"
-    if not binary.exists():
-        log("فایل اجرایی xray پیدا نشد", "error")
-        return False
-    binary.chmod(0o755)
-    log("Xray-core با موفقیت نصب شد", "success")
-    return True
+        download_url = out.strip()
+        log_info(f"لینک دریافت شد: {download_url}")
 
-# ════════════════ REALITY IDENTITY ════════════════
-def generate_identity() -> Tuple[Optional[str], Optional[str], Optional[str]]:
-    """ساخت UUID و کلیدهای امنیتی Reality"""
-    code, uuid_out, err = run_cmd(f"{XRAY_BIN} uuid")
-    if code != 0:
-        log(f"خطای UUID: {err}", "error")
+        # آماده‌سازی دایرکتوری
+        os.makedirs(os.path.dirname(xray_path), exist_ok=True)
+
+        # دانلود و استخراج
+        with tempfile.TemporaryDirectory() as tmpdir:
+            zip_path = os.path.join(tmpdir, "xray.zip")
+            code, _, _ = run_command(f"curl -sL '{download_url}' -o {zip_path}", timeout=60)
+            if code != 0:
+                return log_critical("خطا در دانلود فایل")
+
+            code, _, _ = run_command(f"unzip -o {zip_path} -d {tmpdir}", timeout=15)
+            if code != 0:
+                return log_critical("خطا در استخراج فایل")
+
+            # انتقال فایل اجرایی
+            run_command(f"install -m 755 {tmpdir}/xray {xray_path}")
+
+        # بررسی
+        if os.path.isfile(xray_path) and os.access(xray_path, os.X_OK):
+            log_success(f"Xray-Core با موفقیت نصب شد: {xray_path}")
+            return True
+        else:
+            return log_critical("فایل Xray-Core یافت نشد یا دسترسی اجرایی ندارد")
+    except Exception as e:
+        return log_critical(f"خطای پیش‌بینی نشده: {e}")
+
+
+def generate_reality_identity(xray_path: str = XRAY_BIN) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """تولید هویت امن Reality (UUID، کلید عمومی و خصوصی)."""
+    try:
+        # تولید UUID
+        code, uid, err = run_command(f"{xray_path} uuid")
+        if code != 0: raise RuntimeError(f"UUID خطا: {err}")
+
+        # تولید کلیدها
+        code, keys, err = run_command(f"{xray_path} x25519")
+        if code != 0: raise RuntimeError(f"x25519 خطا: {err}")
+
+        # استخراج
+        priv = [line.split()[-1] for line in keys.splitlines() if "Private" in line][0]
+        pub = [line.split()[-1] for line in keys.splitlines() if "Public" in line][0]
+        return uid.strip(), pub.strip(), priv.strip()
+    except Exception as e:
+        log_error(f"خطا در تولید کلیدها: {e}")
         return None, None, None
-    code, keys_out, err = run_cmd(f"{XRAY_BIN} x25519")
-    if code != 0:
-        log(f"خطای x25519: {err}", "error")
-        return None, None, None
 
-    priv = [l.split()[-1] for l in keys_out.splitlines() if "Private" in l]
-    pub  = [l.split()[-1] for l in keys_out.splitlines() if "Public" in l]
-    if not priv or not pub:
-        log("کلیدهای Reality استخراج نشد", "error")
-        return None, None, None
-    return uuid_out.strip(), pub[0].strip(), priv[0].strip()
 
-# ════════════════ CONFIG GENERATOR ════════════════
-def build_config(uuid: str, priv: str, port: int, dest: str, sni: List[str]) -> Dict:
-    """تولید پیکربندی Reality برای Xray"""
-    return {
+def generate_reality_config(
+    uuid: str, private_key: str,
+    port: int = DEFAULT_PORT,
+    dest: str = DEFAULT_DEST,
+    server_names: list = DEFAULT_SERVER_NAMES,
+    short_id: str = ""
+) -> dict:
+    """ساخت دیکشنری پیکربندی Reality Xray."""
+    config = {
         "log": {
             "loglevel": "warning"
         },
-        "inbounds": [{
-            "tag": "reality-in",
-            "listen": "0.0.0.0",
-            "port": port,
-            "protocol": "vless",
-            "settings": {
-                "clients": [{
-                    "id": uuid,
-                    "flow": "xtls-rprx-vision"
-                }],
-                "decryption": "none"
-            },
-            "streamSettings": {
-                "network": "tcp",
-                "security": "reality",
-                "realitySettings": {
-                    "show": False,
-                    "dest": dest,
-                    "xver": 0,
-                    "serverNames": sni,
-                    "privateKey": priv,
-                    "shortIds": [""],
-                    "minClientVer": "1.8.0"
+        "inbounds": [
+            {
+                "tag": "reality-in",
+                "listen": "0.0.0.0",
+                "port": port,
+                "protocol": "vless",
+                "settings": {
+                    "clients": [
+                        {
+                            "id": uuid,
+                            "flow": "xtls-rprx-vision"
+                        }
+                    ],
+                    "decryption": "none"
+                },
+                "streamSettings": {
+                    "network": "tcp",
+                    "security": "reality",
+                    "realitySettings": {
+                        "show": False,
+                        "dest": dest,
+                        "xver": 0,
+                        "serverNames": server_names,
+                        "privateKey": private_key,
+                        "shortIds": [short_id],
+                        "minClientVer": "1.8.0",
+                        "maxClientVer": "",
+                        "maxTimeDiff": 60   # <-- FIXED: از 0 به 60 ثانیه تغییر کرد
+                    }
                 }
             }
-        }],
+        ],
         "outbounds": [
-            {"protocol": "freedom", "tag": "direct"},
-            {"protocol": "blackhole", "tag": "block"}
+            {
+                "tag": "direct",
+                "protocol": "freedom",
+                "settings": {}
+            },
+            {
+                "tag": "block",
+                "protocol": "blackhole",
+                "settings": {}
+            }
         ]
     }
+    return config
 
-# ════════════════ TUNNEL METHODS ════════════════
-def install_bore() -> bool:
-    """نصب Bore در صورت عدم وجود"""
-    if BORE_BIN.exists():
+
+def save_config(config: dict, path: str = "/tmp/g2ray_config.json") -> bool:
+    """ذخیره فیزیکی فایل پیکربندی."""
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+        log_success(f"پیکربندی در {path} ذخیره شد")
         return True
-    log("نصب تونل Bore...", "info")
-    code, _, _ = run_cmd(f"curl -sL '{BORE_URL}' | tar xz -C /tmp && sudo mv /tmp/bore {BORE_BIN}", timeout=30)
-    if code != 0 or not BORE_BIN.exists():
-        log("نصب Bore ناموفق", "error")
-        return False
-    BORE_BIN.chmod(0o755)
-    return True
+    except Exception as e:
+        return log_critical(f"خطا در ذخیره پیکربندی: {e}")
 
-def start_bore(port: int, timeout: int = TUNNEL_TIMEOUT) -> Optional[str]:
-    """ایجاد تونل Bore با تایم‌اوت و نظارت بر فایل خروجی"""
-    if not install_bore():
+
+# ══════════════════════════════════════════════════════════════
+# 3. TUNNEL MANAGEMENT
+# ══════════════════════════════════════════════════════════════
+
+def start_bore_tunnel(local_port: int = DEFAULT_PORT) -> Optional[str]:
+    """ایجاد تونل TCP با استفاده از Bore (کاملاً رایگان و بدون نیاز به توکن)."""
+    log_info("راه‌اندازی تونل امن با Bore...")
+    try:
+        # نصب Bore
+        bore_url = "https://github.com/ekzhang/bore/releases/download/v0.5.2/bore-v0.5.2-x86_64-unknown-linux-musl.tar.gz"
+        code, _, _ = run_command(f"curl -sL '{bore_url}' | tar xz -C /tmp && sudo mv /tmp/bore {BORE_BIN}", timeout=20)
+        if code != 0 or not os.path.isfile(BORE_BIN):
+            log_error("خطا در نصب Bore")
+            return None
+
+        # راه‌اندازی تونل
+        log_info(f"باز کردن تونل روی پورت {local_port}...")
+        cmd = f"{BORE_BIN} local {local_port} --to {BORE_REMOTE} > /tmp/bore.log 2>&1 &"
+        code, _, _ = run_command(cmd)
+        if code != 0:
+            log_error("خطا در اجرای تونل")
+            return None
+
+        # انتظار با حلقه برای استخراج آدرس
+        remote_addr = None
+        for _ in range(30):   # حداکثر ۳۰ ثانیه صبر
+            time.sleep(1)
+            if os.path.isfile("/tmp/bore.log"):
+                with open("/tmp/bore.log", "r") as f:
+                    log_content = f.read()
+                match = re.search(r'listening on\s+([^\s]+)', log_content)
+                if match:
+                    remote_addr = match.group(1)
+                    break
+
+        if remote_addr:
+            log_success(f"تونل Bore فعال شد: {remote_addr}")
+            return remote_addr
+
+        log_error("خطا در استخراج آدرس تونل پس از ۳۰ ثانیه")
+        return None
+    except Exception as e:
+        log_error(f"استثنا در تونل: {e}")
         return None
 
-    log("اجرای تونل Bore...", "info")
-    log_file = Path("/tmp/bore_output.txt")
-    cmd = f"{BORE_BIN} local {port} --to bore.pub > {log_file} 2>&1"
-    proc = subprocess.Popen(cmd, shell=True, preexec_fn=os.setsid)  # detach
-    deadline = time.time() + timeout
-    tunnel_addr = None
-    while time.time() < deadline:
-        if log_file.exists() and log_file.stat().st_size > 0:
-            content = log_file.read_text(errors='ignore')
-            match = re.search(r'listening on\s+(\S+:\d+)', content)
-            if match:
-                tunnel_addr = match.group(1)
-                break
-        time.sleep(1)
 
-    if tunnel_addr:
-        log(f"Bore فعال شد: {tunnel_addr}", "success")
-        return tunnel_addr
-    else:
-        log("Bore در زمان مقرر پاسخی نداد", "warn")
-        os.killpg(os.getpgid(proc.pid), signal.SIGTERM) if proc else None
+def start_ssh_tunnel(local_port: int = DEFAULT_PORT) -> Optional[str]:
+    """ایجاد تونل SSH جایگزین (با localhost.run) در صورت عدم موفقیت Bore."""
+    log_info("تلاش برای تونل پشتیبان SSH (localhost.run)...")
+    try:
+        cmd = f"ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=60 -R 80:localhost:{local_port} nokey@localhost.run > /tmp/ssh_tunnel.log 2>&1 &"
+        code, _, _ = run_command(cmd)
+        if code != 0:
+            return None
+
+        # حلقه انتظار مشابه Bore
+        for _ in range(20):
+            time.sleep(1)
+            if os.path.isfile("/tmp/ssh_tunnel.log"):
+                with open("/tmp/ssh_tunnel.log", "r") as f:
+                    content = f.read()
+                match = re.search(r'(https?://[^\s]+)', content)
+                if match:
+                    url = match.group(1).replace('https://', '').replace('http://', '')
+                    log_success(f"تونل SSH فعال شد: {url}")
+                    return url
+        return None
+    except Exception as e:
+        log_error(f"استثنا SSH: {e}")
         return None
 
-def start_ssh_tunnel(port: int, timeout: int = TUNNEL_TIMEOUT) -> Optional[str]:
-    """تونل SSH با localhost.run (رایگان و بدون ثبت‌نام)"""
-    log("اجرای تونل SSH (localhost.run)...", "info")
-    log_file = Path("/tmp/ssh_output.txt")
-    cmd = f"ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=60 -R 80:localhost:{port} nokey@localhost.run > {log_file} 2>&1"
-    proc = subprocess.Popen(cmd, shell=True, preexec_fn=os.setsid)
-    deadline = time.time() + timeout
-    tunnel_host = None
-    while time.time() < deadline:
-        if log_file.exists() and log_file.stat().st_size > 0:
-            content = log_file.read_text(errors='ignore')
-            match = re.search(r'https?://(\S+)', content)
-            if match:
-                raw = match.group(1)
-                # حذف پروتکل و / اضافی
-                tunnel_host = raw.replace('https://', '').replace('http://', '').rstrip('/')
-                break
-        time.sleep(1)
 
-    if tunnel_host:
-        log(f"SSH تونل فعال: {tunnel_host}", "success")
-        return tunnel_host
-    else:
-        log("SSH تونل پاسخی نداد", "warn")
-        os.killpg(os.getpgid(proc.pid), signal.SIGTERM) if proc else None
-        return None
+# ══════════════════════════════════════════════════════════════
+# 4. CLIENT LINK GENERATION
+# ══════════════════════════════════════════════════════════════
 
-def obtain_tunnel(port: int) -> str:
-    """امتحان تونل‌ها به ترتیب و برگرداندن اولین مورد موفق"""
-    for method in (start_bore, start_ssh_tunnel):
-        addr = method(port)
-        if addr:
-            return addr
-    return "NO_TUNNEL"
+def generate_vless_links(
+    uuid: str, public_key: str, tunnel_host: str, port: int = 443,
+    sni: str = "www.aparat.com"
+) -> Tuple[str, str]:
+    """تولید لینک‌های استاندارد VLESS Reality."""
+    # لینک اصلی
+    base = f"vless://{uuid}@{tunnel_host}:{port}?encryption=none&security=reality&flow=xtls-rprx-vision&type=tcp&sni={sni}&fp=chrome&pbk={public_key}"
 
-# ════════════════ VLESS LINK BUILDER ════════════════
-def make_vless_link(uuid: str, pub_key: str, host: str, port: int, sni: str) -> str:
-    """تولید لینک استاندارد VLESS Reality"""
-    return (f"vless://{uuid}@{host}:{port}?encryption=none&security=reality"
-            f"&flow=xtls-rprx-vision&type=tcp&sni={sni}&fp=chrome&pbk={pub_key}"
-            f"#G2Ray-Iran")
+    full_link = base + "#G2Ray-Aparat-Auto"
 
-# ════════════════ MAIN ORCHESTRATOR ════════════════
-def main():
-    banner()
-    parser = argparse.ArgumentParser(description="G2Ray Ultimate Panel")
-    parser.add_argument("--backup", action="store_true",
-                        help="استفاده از یک سایت تصادفی ایرانی به جای آپارات")
-    parser.add_argument("--sni", help="SNI دلخواه (مثال: www.digikala.com,digikala.com)")
+    # لینک دوم (فاقد فرگمنت)
+    raw_link = base
+
+    return full_link, raw_link
+
+
+def print_connection_summary(config_data: dict) -> None:
+    """نمایش نهایی و جذاب اطلاعات اتصال در خروجی."""
+    uuid = config_data.get("uuid", "")
+    pub = config_data.get("public_key", "")
+    tunnel = config_data.get("tunnel", "")
+    port = config_data.get("port", 443)
+    sni = config_data.get("sni", "www.aparat.com")
+
+    full, _ = generate_vless_links(uuid, pub, tunnel, port, sni)
+
+    print(f"""
+{Colors.CYAN}{Colors.BOLD}
+╔═══════════════════════════════════════════════════════════════════╗
+║                    اطلاعات اتصال G2Ray Reality                    ║
+╠═══════════════════════════════════════════════════════════════════╣
+║                                                                   ║
+║   {Colors.GREEN}UUID:{Colors.END}        {uuid}
+║   {Colors.GREEN}Public Key:{Colors.END}   {pub}
+║   {Colors.GREEN}SNI (Goal):{Colors.END}   {sni}
+║   {Colors.GREEN}Port:{Colors.END}        {port}
+║   {Colors.GREEN}Flow:{Colors.END}        xtls-rprx-vision
+║   {Colors.GREEN}Network:{Colors.END}     tcp
+║   {Colors.GREEN}Security:{Colors.END}    reality
+║   {Colors.GREEN}Fingerprint:{Colors.END} chrome
+║   {Colors.GREEN}Tunnel Host:{Colors.END} {tunnel}
+║                                                                   ║
+║   لینک کامل اتصال:                                               ║
+║   {full}
+║                                                                   ║
+╚═══════════════════════════════════════════════════════════════════╝
+{Colors.END}""")
+
+
+# ══════════════════════════════════════════════════════════════
+# 5. MAIN ENTRY POINT
+# ══════════════════════════════════════════════════════════════
+
+def main() -> int:
+    """تابع اصلی مدیریت تمام فرآیندها."""
+    print_banner()
+
+    # پارس آرگومان‌ها
+    parser = argparse.ArgumentParser(description="G2Ray Reality Panel")
+    parser.add_argument("--tunnel", choices=["bore", "ssh", "auto"], default="auto", help="نوع تونل")
+    parser.add_argument("--dest", default=DEFAULT_DEST, help="هدف شبیه‌سازی")
+    parser.add_argument("--sni", nargs='+', default=None, help="SNI لیست")
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="پورت لوکال")
+    parser.add_argument("--backup-site", action="store_true", help="استفاده از سایت پشتیبان")
     args = parser.parse_args()
 
     # انتخاب سایت هدف
-    if args.backup:
-        site = random.choice(IRANIAN_SITES)
-        dest, sni = site["dest"], site["sni"]
-    else:
-        dest = "www.aparat.com:443"
-        sni = args.sni.split(",") if args.sni else ["www.aparat.com", "aparat.com"]
+    dest = args.dest
+    sni_list = args.sni if args.sni else DEFAULT_SERVER_NAMES
+    if args.backup_site:
+        chosen = random.choice(backup_iranian_sites)
+        dest = chosen["dest"]
+        sni_list = chosen["sni"]
+        log_info(f"سایت پشتیبان انتخاب شد: {sni_list[0]}")
 
-    # ۱. نصب Xray
-    if not install_xray():
-        sys.exit(1)
+    # 1. دانلود Xray-Core
+    if not download_xray_core():
+        return 1
 
-    # ۲. تولید هویت
-    uid, pub, priv = generate_identity()
+    # 2. تولید هویت
+    log_info("تولید هویت امنیتی...")
+    uid, pub, priv = generate_reality_identity()
     if not all([uid, pub, priv]):
-        log("تولید هویت امنیتی شکست خورد", "error")
-        sys.exit(1)
-    log(f"UUID: {uid[:8]}... | PublicKey: {pub[:12]}...", "success")
+        return log_critical("تولید هویت ناموفق")
+    log_success(f"UUID: {uid}")
 
-    # ۳. ساخت پیکربندی
-    config = build_config(uid, priv, LOCAL_PORT, dest, sni)
-    CONFIG_PATH.write_text(json.dumps(config, indent=2, ensure_ascii=False))
-    log("پیکربندی Reality ذخیره شد", "success")
+    # 3. ساخت و ذخیره پیکربندی
+    log_info("ساخت پیکربندی Reality...")
+    config = generate_reality_config(uid, priv.strip(), port=args.port, dest=dest, server_names=sni_list)
+    if not save_config(config):
+        return 1
 
-    # ۴. اجرای Xray-core
-    log("راه‌اندازی سرویس Xray...", "info")
-    xray_proc = subprocess.Popen(
-        [str(XRAY_BIN), "run", "-config", str(CONFIG_PATH)],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        preexec_fn=os.setsid
-    )
+    # 4. اجرای Xray-Core
+    log_info("راه‌اندازی سرویس Xray...")
+    xray_cmd = f"{XRAY_BIN} run -config /tmp/g2ray_config.json > /tmp/xray.log 2>&1 &"
+    code, _, _ = run_command(xray_cmd)
+    if code != 0:
+        return log_critical("اجرای Xray ناموفق")
     time.sleep(2)
-    if xray_proc.poll() is not None:
-        log("Xray نتوانست اجرا شود (پورت شاید در دسترس نباشد)", "error")
-        sys.exit(1)
-    log("Xray-core با موفقیت اجرا شد", "success")
+    log_success("سرویس Xray فعال شد")
 
-    # ۵. تهیه تونل
-    tunnel_addr = obtain_tunnel(LOCAL_PORT)
-    if tunnel_addr == "NO_TUNNEL":
-        log("هیچ تونلی فعال نشد. کانفیگ بدون تونل نمایش داده می‌شود.", "warn")
-        # ادامه می‌دهیم تا کاربر کانفیگ را دریافت کند (باید خودش تونل تهیه کند)
+    # 5. راه‌اندازی تونل
+    tunnel_host: Optional[str] = None
+    if args.tunnel in ("auto", "bore"):
+        tunnel_host = start_bore_tunnel(args.port)
+    if not tunnel_host and args.tunnel in ("auto", "ssh"):
+        tunnel_host = start_ssh_tunnel(args.port)
 
-    # ۶. چاپ اطلاعات اتصال
-    endpoint = tunnel_addr if tunnel_addr != "NO_TUNNEL" else "YOUR_TUNNEL_ADDRESS:PORT"
-    vless_link = make_vless_link(uid, pub, endpoint, LOCAL_PORT, sni[0])
-    print(f"""
-{C.BOLD}{C.GREEN}═══════════════════════════════════════════════════════
- ✅  کانفیگ آماده – از لینک زیر استفاده کنید
-───────────────────────────────────────────────────
- {C.CYAN}UUID:{C.END}        {uid}
- {C.CYAN}Public Key:{C.END}  {pub}
- {C.CYAN}SNI:{C.END}         {sni[0]}
- {C.CYAN}Port:{C.END}        {LOCAL_PORT}
- {C.CYAN}Destination:{C.END} {dest}
- {C.CYAN}Endpoint:{C.END}    {endpoint}
-───────────────────────────────────────────────────
- 🔗 لینک اتصال نهایی:
- {C.GREEN}{vless_link}{C.END}
-═══════════════════════════════════════════════════════
- ⏳ سرور اکنون فعال است و تا ۶ ساعت کار می‌کند.
-    هر ۵ دقیقه یک بار پیام زنده بودن نمایش داده می‌شود.
-    برای توقف می‌توانید Workflow را کنسل کنید.
-{C.END}
-""")
+    if not tunnel_host:
+        return log_critical("خطا در برقراری تونل. ارتباط میسر نشد")
 
-    # ۷. نظارت بر سرور و ارسال heartbeat
-    def handler(signum, frame):
-        log("دریافت سیگنال توقف", "warn")
-        raise KeyboardInterrupt
+    # 6. جمع‌بندی اطلاعات
+    connection_data = {
+        "uuid": uid,
+        "public_key": pub,
+        "private_key": priv,
+        "port": args.port,
+        "tunnel": str(tunnel_host),
+        "sni": str(sni_list[0]),
+        "link": ""
+    }
 
-    signal.signal(signal.SIGTERM, handler)
-    signal.signal(signal.SIGINT, handler)
+    # 7. نمایش و ذخیره‌سازی نهایی
+    print_connection_summary(connection_data)
 
-    start_time = time.time()
+    log_info("سرور آماده دریافت اتصال است. (برای خروج Ctrl+C را بزنید)")
     try:
-        while xray_proc.poll() is None:
-            elapsed = int(time.time() - start_time)
-            if elapsed % MONITOR_INTERVAL < 30:  # پنجره ۳۰ ثانیه‌ای برای چاپ
-                log(f"سرور فعال است ({elapsed//60} دقیقه گذشته)", "heartbeat")
-                # چاپ مجدد لینک برای دسترسی آسان در لاگ
-                print(f"{C.GREEN}لینک جاری: {vless_link}{C.END}")
-            time.sleep(30)
+        while True:
+            time.sleep(60)
     except KeyboardInterrupt:
-        log("خاتمه سرور", "warn")
-    finally:
-        if xray_proc.poll() is None:
-            os.killpg(os.getpgid(xray_proc.pid), signal.SIGTERM)
-        log("سرویس G2Ray خاتمه یافت", "info")
+        log_info("پنل متوقف شد")
+
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
