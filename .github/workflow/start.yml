@@ -1,27 +1,40 @@
-name: VPN Generator (6h)
+name: Auto Generate VLESS Config
 
 on:
-  workflow_dispatch:
   schedule:
-    - cron: '0 */6 * * *'   # every 6 hours
+    - cron: "0 */6 * * *"  # هر 6 ساعت یکبار
+  workflow_dispatch:  # امکان اجرای دستی
 
 jobs:
-  generate-and-run:
+  generate:
     runs-on: ubuntu-latest
-    timeout-minutes: 360     # 6 hours max
+    timeout-minutes: 10  # حداکثر زمان اجرا: ۱۰ دقیقه
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.10"
 
-      - name: Install Python dependencies
+      - name: Install system dependencies
         run: |
-          pip install --upgrade pip
-          pip install requests qrcode-terminal
+          sudo apt-get update
+          sudo apt-get install -y qrencode curl unzip
 
-      - name: Run generator and VPN
-        run: python main.py 
+      - name: Install python packages
+        run: pip install requests
+
+      - name: Run config generator
+        run: python main.py
+
+      - name: Upload config artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vless-config-${{ github.run_id }}
+          path: |
+            config_output.txt
+            config_qr.png
+            xray_config.json
+          retention-days: 1  # خودکار بعد از 1 روز پاک شود
