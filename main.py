@@ -1,158 +1,290 @@
 #!/usr/bin/env python3
-import os
-import json
-import time
-import uuid
-import random
-import subprocess
-import sys
-from datetime import datetime, timedelta, timezone
+"""
+GitHub Actions VLESS Config Generator
+نسخه 1.0 - دیباگ شده و بهینه
+"""
 
+import os, json, uuid, subprocess, sys, base64, time
 import requests
-from qrcode_terminal import draw
 
-# ─────────────────────────────────────────────────────
-# 1. Get the workflow runner’s public IP
-# ─────────────────────────────────────────────────────
-try:
-    resp = requests.get("https://api.ipify.org?format=json", timeout=10)
-    PUBLIC_IP = resp.json()["ip"]
-except Exception:
-    # fallback
-    PUBLIC_IP = subprocess.check_output(
-        "curl -s ifconfig.me", shell=True
-    ).decode().strip()
-
-print(f"🌍 Detected public IP: {PUBLIC_IP}")
-
-# ─────────────────────────────────────────────────────
-# 2. Prepare Xray (download if missing)
-# ─────────────────────────────────────────────────────
-XRAY_ZIP = "Xray-linux-64.zip"
+# ---------- تنظیمات ثابت ----------
+CONFIG_OUTPUT_FILE = "config_output.txt"
+QR_OUTPUT_FILE = "config_qr.png"
+XRAY_CONFIG_FILE = "xray_config.json"
 XRAY_BIN = "./xray"
-if not os.path.exists(XRAY_BIN):
-    print("⬇️ Downloading Xray core ...")
-    url = "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
-    r = requests.get(url, allow_redirects=True)
-    with open(XRAY_ZIP, "wb") as f:
-        f.write(r.content)
-    os.system(f"unzip -o {XRAY_ZIP} && chmod +x xray")
-    os.remove(XRAY_ZIP)
+XRAY_VERSION = "v1.8.23"
 
-# ─────────────────────────────────────────────────────
-# 3. Generate a random port and UUID + expiry (6 h from now)
-# ─────────────────────────────────────────────────────
-PORT = random.randint(10000, 60000)
-USER_UUID = str(uuid.uuid4())
-EXPIRE_UTC = (datetime.now(timezone.utc) + timedelta(hours=6)).strftime(
-    "%Y-%m-%dT%H:%M:%SZ"
-)
+# برای امنیت بیشتر، این مقادیر رو میتونی عوض کنی
+FALLBACK_DEST = "www.aparat.com" # سایت ایرانی برای fallback
+FALLBACK_PORT = 443
 
-# ─────────────────────────────────────────────────────
-# 4. Create Xray server config (VLESS over TCP)
-# ─────────────────────────────────────────────────────
-config = {
-    "log": {"loglevel": "warning"},
-    "inbounds": [
-        {
-            "port": PORT,
-            "protocol": "vless",
-            "settings": {
-                "clients": [
-                    {
-                        "id": USER_UUID,
-                        "level": 0,
-                        "email": "gh-user",
-                        "expiry": EXPIRE_UTC,
-                    }
-                ],
-                "decryption": "none",
-            },
-            "streamSettings": {"network": "tcp"},
-        }
-    ],
-    "outbounds": [{"protocol": "freedom"}],
-}
-
-with open("config.json", "w") as f:
-    json.dump(config, f, indent=2)
-
-print(f"✅ Config written – port {PORT}, expiry {EXPIRE_UTC}")
-
-# ─────────────────────────────────────────────────────
-# 5. Start Xray in the background
-# ─────────────────────────────────────────────────────
-proc = subprocess.Popen([XRAY_BIN, "run", "-c", "config.json"],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL)
-print(f"🚀 Xray started (PID {proc.pid})")
-
-# Wait a second to ensure it's listening
-time.sleep(2)
-
-# ─────────────────────────────────────────────────────
-# 6. Build the VLESS client link and print QR code
-# ─────────────────────────────────────────────────────
-vless_link = f"vless://{USER_UUID}@{PUBLIC_IP}:{PORT}?encryption=none&security=none&type=tcp#{PUBLIC_IP}"
-
-print("\n" + "=" * 50)
-print("🔗 VLESS config (valid 6 hours):")
-print(vless_link)
-print("=" * 50 + "\n")
-
-print("📱 Scan this QR code in your v2ray client:")
-draw(vless_link)
-
-# ─────────────────────────────────────────────────────
-# 7. (Optional) Print a client‑side routing snippet
-#    that sends top Iranian sites directly,
-#    making the tunnel less suspicious.
-# ─────────────────────────────────────────────────────
-IRANIAN_DOMAINS = [
-    "aparat.com","varzesh3.com","digikala.com","namnak.com",
-    "beytoote.com","niniban.com","telewebion.com","filimo.com",
-    "snapp.ir","tapsi.ir","divar.ir","sheypoor.com",
-    "isna.ir","irna.ir","tabnak.ir","khabaronline.ir",
-    "yjc.ir","mehrnews.com","farsnews.ir","tasnimnews.com",
-    "eghtesadnews.com","asarayan.com","bartarinha.ir",
-    "delgarm.com","akharinkhabar.ir"
+# لیست ۲۵ سایت برتر ایران برای مسیریابی (بر اساس Similarweb 2025)
+IRAN_TOP_SITES = [
+    "aparat.com", "digikala.com", "varzesh3.com", "shaparak.ir",
+    "namava.ir", "filimo.com", "bama.ir", "divar.ir", "snapp.ir",
+    "zoomit.ir", "isna.ir", "irna.ir", "namnak.com", "emalls.ir",
+    "cafebazaar.ir", "ninisite.com", "torob.com", "soft98.ir",
+    "digiato.com", "zoomnews.ir", "telewebion.com", "yjc.ir",
+    "khabaronline.ir", "farsnews.ir", "mehrnews.com"
 ]
 
-print("\n🧩 Suggested routing config for your client (V2RayN / Nekoray etc.):")
-print("Add the following domains as 'direct' outbound so that only")
-print("international traffic goes through the VPN.")
-print("-" * 30)
-print("domainStrategy: AsIs")
-for d in IRANIAN_DOMAINS:
-    print(f"domain: {d} -> direct")
-print("-" * 30)
-
-# ─────────────────────────────────────────────────────
-# 8. Keep the workflow alive for 6 hours + dummy traffic
-#    (download/upload activity prevents idle‑kill)
-# ─────────────────────────────────────────────────────
-def generate_traffic():
-    """Small download to simulate active usage."""
+def run_cmd(cmd, check=True):
+    """اجرای دستورات سیستم با مدیریت خطا"""
+    print(f"[CMD] {' '.join(cmd)}")
     try:
-        # Download a small file (approx 1 MB)
-        r = requests.get("https://speed.hetzner.de/1MB.bin", timeout=15)
-        print(f"⬇️ Traffic: received {len(r.content)} bytes")
-    except Exception:
-        print("⚠️ Traffic fetch failed (non‑critical)")
+        result = subprocess.run(cmd, capture_output=True, text=True, check=check)
+        return result.stdout.strip()
+    except subprocess.CalledProcessError as e:
+        print(f"[ERROR] Command failed: {e}")
+        print(f"[ERROR] stderr: {e.stderr}")
+        raise
 
-    # Fake "upload" via a POST request (tiny payload)
-    try:
-        r = requests.post("https://httpbin.org/post", data=b"A"*512, timeout=10)
-        print(f"⬆️ Upload test: {r.status_code}")
-    except Exception:
-        pass
+def get_public_ip():
+    """دریافت IP عمومی Runner با چند منبع پشتیبان"""
+    apis = [
+        "https://api.ipify.org",
+        "https://ifconfig.me/ip",
+        "https://icanhazip.com"
+    ]
+    for api in apis:
+        try:
+            print(f"[*] Trying to get IP from {api}...")
+            ip = requests.get(api, timeout=10).text.strip()
+            if ip and '.' in ip:
+                print(f"[OK] Public IP: {ip}")
+                return ip
+        except Exception as e:
+            print(f"[WARN] Could not fetch IP from {api}: {e}")
+    raise Exception("Failed to get public IP from all sources")
 
-print("\n⏳ Running for 6 hours – do NOT close this tab...\n")
+def download_xray():
+    """دانلود Xray-core از گیت‌هاب (مستقیم)"""
+    url = f"https://github.com/XTLS/Xray-core/releases/download/{XRAY_VERSION}/Xray-linux-64.zip"
+    print(f"[*] Downloading Xray-core {XRAY_VERSION}...")
+    
+    # تلاش دانلود با حداکثر 3 بار
+    for attempt in range(3):
+        try:
+            response = requests.get(url, timeout=120, stream=True)
+            response.raise_for_status()
+            with open("xray.zip", "wb") as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            print("[OK] Xray downloaded successfully")
+            break
+        except Exception as e:
+            print(f"[WARN] Download attempt {attempt+1} failed: {e}")
+            time.sleep(2)
+    else:
+        raise Exception("Failed to download Xray after 3 attempts")
+    
+    # استخراج فایل
+    run_cmd(["unzip", "-o", "xray.zip", "xray"])
+    os.chmod("xray", 0o755)
+    print("[OK] Xray binary is ready")
 
-DEADLINE = time.time() + 6 * 3600
-while time.time() < DEADLINE:
-    generate_traffic()
-    time.sleep(120)   # every 2 minutes
+def generate_keys():
+    """تولید کلیدهای امنیتی و UUID"""
+    # اجرای Xray برای تولید UUID
+    uuid_output = run_cmd([XRAY_BIN, "uuid"])
+    uid = uuid_output.strip()
+    
+    # تولید کلید خصوصی x25519
+    keys_output = run_cmd([XRAY_BIN, "x25519"])
+    # خروجی شامل "Private key: ..." و "Public key: ..." است
+    lines = keys_output.split('\n')
+    private_key = lines[0].replace("Private key:", "").strip()
+    public_key = lines[1].replace("Public key:", "").strip()
+    
+    # تولید shortId تصادفی
+    short_id = uuid.uuid4().hex[:16]
+    
+    print(f"[OK] UUID: {uid}")
+    print(f"[OK] Private Key: {private_key[:20]}...")
+    print(f"[OK] Short ID: {short_id}")
+    
+    return uid, private_key, public_key, short_id
 
-# Clean exit – the workflow will stop on its own.
-print("⏰ 6‑hour window ended. Config expired. Workflow will now stop.")
+def generate_xray_config(public_ip, uid, private_key, short_id):
+    """ایجاد فایل کانفیگ Xray-core با قابلیت مسیریابی سایت‌های ایرانی"""
+    config = {
+        "log": {
+            "loglevel": "warning",
+            "access": "/dev/null",
+            "error": "/dev/null"
+        },
+        "inbounds": [{
+            "listen": "0.0.0.0",
+            "port": 443,
+            "protocol": "vless",
+            "settings": {
+                "clients": [{
+                    "id": uid,
+                    "flow": "xtls-rprx-vision"
+                }],
+                "decryption": "none"
+            },
+            "streamSettings": {
+                "network": "tcp",
+                "security": "reality",
+                "realitySettings": {
+                    "show": False,
+                    "dest": f"{FALLBACK_DEST}:{FALLBACK_PORT}",
+                    "xver": 0,
+                    "serverNames": [FALLBACK_DEST],
+                    "privateKey": private_key,
+                    "shortIds": [short_id]
+                }
+            }
+        }],
+        "outbounds": [
+            {
+                "protocol": "freedom",
+                "tag": "direct",
+                "settings": {
+                    "domainStrategy": "UseIP"
+                }
+            },
+            {
+                "protocol": "blackhole",
+                "tag": "block"
+            }
+        ],
+        "routing": {
+            "domainStrategy": "IPIfNonMatch",
+            "rules": [
+                {
+                    # مسیر مستقیم برای سایت‌های ایرانی
+                    "type": "field",
+                    "domain": [f"domain:{site}" for site in IRAN_TOP_SITES],
+                    "outboundTag": "direct"
+                },
+                {
+                    # مسیر مستقیم برای IPهای ایران
+                    "type": "field",
+                    "ip": ["geoip:ir"],
+                    "outboundTag": "direct"
+                },
+                {
+                    # بلاک کردن ترافیک به پورت‌های مخرب
+                    "type": "field",
+                    "port": "135,137-139,445",
+                    "outboundTag": "block"
+                }
+            ]
+        }
+    }
+    
+    with open(XRAY_CONFIG_FILE, "w") as f:
+        json.dump(config, f, indent=2)
+    
+    print(f"[OK] Xray config written to {XRAY_CONFIG_FILE}")
+    return config
+
+def generate_vless_link(public_ip, uid, public_key, short_id):
+    """تولید لینک VLESS قابل استفاده در کلاینت"""
+    # قالب لینک VLESS:
+    # vless://UUID@IP:PORT?type=tcp&security=reality&flow=xtls-rprx-vision
+    # &fp=chrome&pbk=PUBLIC_KEY&sni=FALLBACK_DEST&sid=SHORT_ID#NAME
+    
+    name = f"GitHub-Actions-{public_ip}"
+    params = {
+        "type": "tcp",
+        "security": "reality",
+        "flow": "xtls-rprx-vision",
+        "pbk": public_key,
+        "sni": FALLBACK_DEST,
+        "sid": short_id,
+        "fp": "chrome",
+        "spx": "/"
+    }
+    
+    param_str = "&".join([f"{k}={v}" for k, v in params.items()])
+    vless_link = f"vless://{uid}@{public_ip}:443?{param_str}#{name}"
+    
+    return vless_link
+
+def generate_qr_code(vless_link):
+    """تولید QR Code با کتابخانه qrencode"""
+    # ذخیره لینک در فایل موقت
+    with open("temp_link.txt", "w") as f:
+        f.write(vless_link)
+    
+    # تولید QR code
+    run_cmd(["qrencode", "-o", QR_OUTPUT_FILE, "-r", "temp_link.txt"])
+    print(f"[OK] QR Code saved to {QR_OUTPUT_FILE}")
+
+def main():
+    print("="*50)
+    print("VLESS Config Generator for GitHub Actions")
+    print("="*50)
+    
+    # ۱. دریافت IP
+    public_ip = get_public_ip()
+    
+    # ۲. دانلود Xray
+    download_xray()
+    
+    # ۳. تولید کلیدها
+    uid, private_key, public_key, short_id = generate_keys()
+    
+    # ۴. ایجاد کانفیگ Xray
+    generate_xray_config(public_ip, uid, private_key, short_id)
+    
+    # ۵. اجرای موقت Xray برای تایید سلامت
+    print("[*] Starting Xray for health check...")
+    xray_process = subprocess.Popen([XRAY_BIN, "run", "-config", XRAY_CONFIG_FILE],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(3)  # انتظار برای شروع
+    
+    if xray_process.poll() is not None:
+        print("[ERROR] Xray failed to start. Check configuration.")
+        sys.exit(1)
+    print("[OK] Xray started successfully")
+    
+    # ۶. توقف Xray (نیاز نیست همیشه روشن باشه)
+    xray_process.terminate()
+    xray_process.wait()
+    print("[*] Xray stopped after health check")
+    
+    # ۷. تولید لینک VLESS
+    vless_link = generate_vless_link(public_ip, uid, public_key, short_id)
+    print("\n" + "="*50)
+    print("VLESS CONFIG LINK:")
+    print(vless_link)
+    print("="*50 + "\n")
+    
+    # ۸. تولید QR Code
+    generate_qr_code(vless_link)
+    
+    # ۹. ذخیره نهایی در فایل
+    output_content = f"""VLESS Config - Generated at {time.strftime('%Y-%m-%d %H:%M:%S')}
+Server IP: {public_ip}
+Port: 443
+Protocol: VLESS + XTLS + Reality
+Flow: xtls-rprx-vision
+UUID: {uid}
+Public Key: {public_key}
+Short ID: {short_id}
+SNI: {FALLBACK_DEST}
+Fallback: {FALLBACK_DEST}:{FALLBACK_PORT}
+
+VLESS Link:
+{vless_link}
+
+QR Code saved as: {QR_OUTPUT_FILE}
+
+Routing Rules:
+- Iranian top sites (25 sites) → Direct connection (no VPN)
+- Iranian IP ranges (geoip:ir) → Direct connection
+- Other traffic → Routed through VPN
+"""
+    
+    with open(CONFIG_OUTPUT_FILE, "w", encoding="utf-8") as f:
+        f.write(output_content)
+    
+    print(f"[OK] Results saved to {CONFIG_OUTPUT_FILE}")
+    print("[*] Done! Check the workflow artifacts for the config and QR code.")
+
+if __name__ == "__main__":
+    main()
