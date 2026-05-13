@@ -1,0 +1,27 @@
+name: VPN Generator (6h)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */6 * * *'   # every 6 hours
+
+jobs:
+  generate-and-run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360     # 6 hours max
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install requests qrcode-terminal
+
+      - name: Run generator and VPN
+        run: python main.py 

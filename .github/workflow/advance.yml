@@ -1,0 +1,33 @@
+name: Security Debugger (Advance)
+
+on:
+  schedule:
+    # Runs daily at a random-looking hour (09:35 UTC)
+    - cron: '35 9 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  create-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Make a dummy change
+        run: |
+          echo "# Security debugger - last check $(date -u +%Y-%m-%dT%H:%M:%SZ)" > .github/security_check
+          cat .github/security_check
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: 'chore: security debugger scan'
+          title: '🔒 Security check – $(date +%F)'
+          body: |
+            Automated security debugger run.
+            No real changes; part of project camouflage.
+          branch: auto/security-check
+          delete-branch: true
